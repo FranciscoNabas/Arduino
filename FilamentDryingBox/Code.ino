@@ -77,6 +77,9 @@
 #define PIN_FAN          10
 #define PIN_H_ELEMENT    11
 
+// Fan pin PWM value.
+#define HS_FAN_SPEED     255
+
 // Global variables.
 bool startup             = true;    // Used to determine if the system was booted for the first time.
 bool fan_on              = false;   // True if the heatsink fan is on.
@@ -195,7 +198,7 @@ void loop() {
   // temperature is close enough to the target we keep the fan on to improve circulation.
   if (startup) {
     if (heatsink_temp >= HS_MAX_TEMP) {
-      analogWrite(PIN_FAN, 255);
+      analogWrite(PIN_FAN, HS_FAN_SPEED);
       startup  = false;
       fan_on   = true;
     }
@@ -206,7 +209,7 @@ void loop() {
       fan_on = false;
     }
     else if (!fan_on && heatsink_temp >= HS_MAX_TEMP) {
-      analogWrite(PIN_FAN, 255);
+      analogWrite(PIN_FAN, HS_FAN_SPEED);
       fan_on = true;
     }
   }
@@ -214,9 +217,7 @@ void loop() {
   // Writing if the fan is on and the PWM value on the heating element pin.
   lcd.setCursor(0, 3);
   lcd.print("Fan on:");
-  if (fan_on) lcd.print("Yes");
-  else lcd.print("No ");
-
+  lcd.print(fan_on ? "Yes" : "No ");
   lcd.print(" PWM:");
   lcd.print((uint8_t)output);
 
