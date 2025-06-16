@@ -18,6 +18,8 @@
 * A 100KB potentiomenter to control the target temperature.
 * A 20/4 LCD display with I2C module.
 *
+* In my case with all this aparatus the current draw peak was approximatelly 4.4Amps.
+*
 * Connections:
 * DTH22 data pin       : 12.
 * Heating element pin  : 11.
