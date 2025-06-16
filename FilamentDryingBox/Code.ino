@@ -237,6 +237,10 @@ void control_temperature(void) {
 
   // Applying the percentage to the difference between the minimum and maximum target temperatures.
   // Then we assign to the setpoint before calling 'pid.Compute()'.
+  // We cast to an 'int' here before casting to a 'double' so we keep the target temperature always in increments
+  // of one degree. This is helpful because since we are using a simple potentiomenter and analog readings we are
+  // succeptable to floating and interference. In a future version the potentiomenter will be replaced with a
+  // digital rotary encoder to fancy up thinks a little bit and keep everything more stable.
   set_point = (double)((int)(MIN_TEMP + ((MIN_TEMP - MAX_TEMP) * percent)));
 
   if (!isnan(temperature)) {
