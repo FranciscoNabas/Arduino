@@ -70,7 +70,7 @@
 #define MAX_TEMP         ((double)70.00)  // Maximum target temperature.
 #define TEMP_TGT_DIFF    05.00            // Temperature differential between the heatsink and ambient temperature. Used to decide if we shut off the fan.
 #define HS_MAX_TEMP      80.00            // Heatsink maximum temperature.
-#define HS_TEM_DIFF_CUT  10.00            // Heatsink temperature cutoff. Used to decide if we shut off the fan.
+#define HS_TEM_DIFF_CUT  20.00            // Heatsink temperature cutoff. Used to decide if we shut off the fan.
 
 // Defining DHT22 pins and type.
 #define DHTPIN           12
@@ -163,14 +163,14 @@ void pci_setup(byte pin) {
 ISR(PCINT2_vect) {
   static bool first = true;
 
-  // Getting the encoder state to check if it was rotated.
+  // Getting the encoder state to check if it was rotated and making sure our target temperature is within our limits.
   switch (encoder.getRotation()) {
     case KY040::CLOCKWISE:
-      target_temp++;
+      target_temp = target_temp < MAX_TEMP ? target_temp + 1 : MAX_TEMP;
       break;
 
     case KY040::COUNTERCLOCKWISE:
-      target_temp--;
+      target_temp = target_temp > MIN_TEMP ? target_temp - 1 : MIN_TEMP;
       break;
   }
 
@@ -248,18 +248,15 @@ void loop() {
   // Reading the volatile variables set by the interrupt.
   // During the reading we disable interrupts (cli()) to avoid race conditions.
   cli();
+  set_point = target_temp;      // Setting the PID set point based on the target temperature.
+  our_fan_mode = hs_fan_mode;   // Saving the fan mode so we can analyze it.
+  sei();                        // Re-enabling interrupts.
 
-  // Setting the PID set point based on the raw target temperature. We do this so we don't pass our minimum and maximum.
-  set_point = target_temp >= MIN_TEMP ? target_temp <= MAX_TEMP ? target_temp : MAX_TEMP : MIN_TEMP;
-
-  // Resetting the raw target temperature.
-  target_temp = set_point;
-
-  // Saving the fan mode so we can analyze it.
-  our_fan_mode = hs_fan_mode;
-  
-  // Re-enabling interrupts.
-  sei();
+  // We print all the status twice in the loop. We do that because when all the sensors are functioning it takes
+  // some time to perform all the readings, calculations, and controlling the temperature.
+  // If the user rotates the encoder it takes some time for the value to reflect in the LCD display.
+  // Printing the status here makes it more responsive, but it prints the old values. That's why we print a second time later.
+  print_status();
 
   if (our_fan_mode != hs_prev_mode) {
     // Fan mode changed, so we print the status on the display.
@@ -290,12 +287,6 @@ void loop() {
     // Saving the current mode.
     hs_prev_mode = our_fan_mode;
   }
-
-  // We print all the status twice in the loop. We do that because when all the sensors are functioning it takes
-  // some time to perform all the readings, calculations, and controlling the temperature.
-  // If the user rotates the encoder it takes some time for the value to reflect in the LCD display.
-  // Printing the status here makes it more responsive, but it prints the old values. That's why we print a second time later.
-  print_status();
 
   // Reading ambient temperature.
   sensors_event_t event;
@@ -374,9 +365,9 @@ void loop() {
           }
         }
         else {
-          // We are not starting up, so if the fan is on we turn it off when the heatsink temperature is smaller than the target plus the cuttoff
+          // We are not starting up, so if the fan is on we turn it off when the heatsink temperature is smaller than the ambient temperature plus the cuttoff
           // and the ambient temperature is smaller than the target minus the differential.
-          if (fan_on && heatsink_temp <= set_point + HS_TEM_DIFF_CUT && temperature <= set_point - TEMP_TGT_DIFF) {
+          if (fan_on && heatsink_temp <= temperature + HS_TEM_DIFF_CUT && temperature <= set_point - TEMP_TGT_DIFF) {
             analogWrite(PIN_FAN, 0);
             fan_on = false;
           }
@@ -398,7 +389,7 @@ void loop() {
   // Delaying. This period is sometimes not enough for the heatsink sensor to update which causes
   // us not being able to read the temperature. But it's only once in a while.
   // To be honest there's no harm in increasing the delay here, other than the user's input responsiveness.
-  delay(20);
+  delay(50);
 }
 
 /**
@@ -408,6 +399,8 @@ void loop() {
 * @returns Nothing.
 */
 void print_status(void) {
+  static uint8_t prev_power = 0;
+
   // Printing ambient temperature.
   lcd.print("Tmp:");
   lcd.print(temperature);
@@ -432,12 +425,22 @@ void print_status(void) {
   lcd.write(0);
   lcd.print("C");
 
-  // Writing if the fan is on and the PWM value on the heating element pin.
+  // Writing if the fan is on and the PWM value power equivalent on the heating element pin.
   lcd.setCursor(0, 3);
   lcd.print("Fan on:");
   lcd.print(fan_on ? "Yes" : "No ");
-  lcd.print(" PWM:");
-  lcd.print((uint8_t)output);
+  lcd.print(" PWR:");
+
+  uint8_t current_power = (uint8_t)((output / 255) * 100);
+
+  // If we have less digits we clear the LCD to avoid ghost cells.
+  if (get_digit_count(current_power) < get_digit_count(prev_power))
+    lcd.clear();
+
+  lcd.print(current_power < 100 ? current_power : 100);
+  lcd.print("%");
+
+  prev_power = current_power;
 
   // Homing the LCD and delaying.
   lcd.home();
@@ -497,4 +500,19 @@ float get_heatsink_temperature(void) {
 float get_abs_humidity(void) {
   // I have no idea what in the world this calculation does, got it from the interwebs =p.
   return ((6.112 * (pow(EULER, ((17.67 * temperature) / (temperature + 243.5)))) * relative_humidity * 2.1674) / (273.15 + temperature));
+}
+
+/**
+* @brief Returns the digit count for a given unsigned char (byte).
+*
+* @param[in] number The number to count the digits from.
+* @returns The digit count.
+*/
+uint8_t get_digit_count(uint8_t number) {
+  // Not necessarily pretty, but fast. Specially since we know our number is smal.
+  // https://stackoverflow.com/questions/1068849/how-do-i-determine-the-number-of-digits-of-an-integer-in-c
+  if (number < 10) return 1;
+  if (number < 100) return 2;
+
+  return 3;
 }
