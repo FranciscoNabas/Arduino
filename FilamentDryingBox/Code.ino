@@ -1,6 +1,8 @@
 /*
 * Filament drying box controller.
 *
+* Uma versão em português pt-BR está disponível no arquivo 'TraduçãoDeComentários.md. Cada comentário é enumerado ([n]) para facilitar a localização.
+*
 * This code was based on this project:
 * https://marlonnardi.com/2023/10/10/o-problema-que-acaba-com-suas-impressoes-3d-caixa-secadora-de-filamentos-dry-fila-box/
 *
@@ -10,7 +12,7 @@
 *
 * Parts used:
 * Arduino Pro Mini 5V.
-* DH22 Temperature and Humidity sensor.
+* DHT22 Temperature and Humidity sensor.
 * A hot end heating element with a heatsink.
 * DS18B20 Temperature sensor for the heating element.
 * 80mm / 80mm 12V fan for the heatsink.
@@ -21,12 +23,12 @@
 * In my case with all this aparatus the peak current draw was approximatelly 4.4Amps.
 *
 * Connections:
-* DTH22 data pin       : 12.
+* DHT22 data pin       : 12.
 * Heating element pin  : 11.
 * Heatsink fan pin     : 10.
 * DS18B20 data pin     : 9.
 * Encoder CLK          : 5.
-* Encoder DT           : 5.
+* Encoder DT           : 6.
 * Encoder SW           : 2.
 *
 * Circuit diagram can be found on the post where we based our project on.
@@ -53,6 +55,12 @@
 *
 */
 
+// [1]
+// We tried using the Arduino version of FreeRTOS to use its timer functions
+// and synchronization mechanisms, but it doesn't work well with the board we're using, the Pro Mini 5V.
+// I also learned how the microcontroller schedules code execution and how interrups work, which kinda
+// invalidates the use of semaphores and mutexes anyways, since all output (serial and LCD) has to be sent from the main loop.
+
 // #include <Arduino_FreeRTOS.h>
 // #include <semphr.h>
 
@@ -65,6 +73,7 @@
 #include <DallasTemperature.h>
 #include <LiquidCrystal_I2C.h>
 
+// [2]
 // Defining temperature thresholds.
 #define MIN_TEMP         ((double)30.00)  // Minimum target temperature.
 #define MAX_TEMP         ((double)70.00)  // Maximum target temperature.
@@ -72,11 +81,13 @@
 #define HS_MAX_TEMP      80.00            // Heatsink maximum temperature.
 #define HS_TEM_DIFF_CUT  20.00            // Heatsink temperature cutoff. Used to decide if we shut off the fan.
 
+// [3]
 // Defining DHT22 pins and type.
 #define DHTPIN           12
 #define DHTTYPE          DHT22
 #define EULER            2.718281828459045235360287471352
 
+// [4]
 // IO pins.
 #define PIN_TSENS        9     // The heatsink temperature sensor data pin.
 #define PIN_POT          A7    // The analog pin where the potentiometer is connected. To control the target temperature (pre-encoder, not used anymore).
@@ -86,9 +97,11 @@
 #define PIN_ENC_CLK      5     // The target temperature encoder pin 'A'.
 #define PIN_ENC_SW       2     // The target temperature encoder switch pin.
 
+// [5]
 // Fan pin PWM value.
 #define HS_FAN_SPEED     255
 
+// [6]
 // The KY040 rotary encoder uses internal switches to signal changes.
 // Like all mechanical switches these bounce, I.E. you turn the encoder once or press it once and
 // the encoder sends more than one signal.
@@ -97,9 +110,11 @@
 // before the debounce timeout.
 #define DEBOUNCE_MS      250
 
+// [7]
 // Defines how long should we hold the button down to change the LCD backlight state.
 #define BACKLIGHT_OFF_TRIGGER_MS 1000
 
+// [8]
 // An enum representing the heatsing fan mode.
 enum class heatsink_fan_mode_t {
   ON,       // The fan is always on.
@@ -107,6 +122,7 @@ enum class heatsink_fan_mode_t {
   AUTO,     // The fan is on or off according to our algorithm.
 };
 
+// [9]
 // Global variables.
 bool startup             = true;                      // Used to determine if the system was booted for the first time.
 bool fan_on              = false;                     // True if the heatsink fan is on.
@@ -117,13 +133,14 @@ float heatsink_temp      = 0.0;                       // The heatsink temperatur
 int enc_pina_prev        = 0;                         // Variable to store the previous state of the encoder 'A' (CLK) pin.
 double input, set_point, output;                      // Variables used by the PID controller. input == temperature, set_point == target, output == PID output.
 
-volatile double target_temp;                                            // The raw target temperature set by the encoder's position.
-volatile bool isr_invalidate_next = false;                              // Used to invalidate interrupt processing for the same pin to avoid bouncing.
-volatile bool backlight_on = true;                                      // Holds the value used to determine if we turn on or off the LCD backlight.
-heatsink_fan_mode_t hs_prev_mode = heatsink_fan_mode_t::AUTO;           // The previous fan mode.
-volatile heatsink_fan_mode_t hs_fan_mode = heatsink_fan_mode_t::AUTO;   // The heatsink fan mode to be set by the ISR.
-volatile unsigned long debounce_millis = millis();                      // Stores the milliseconds since the controler was turned on so we can apply to the debouncer.
+volatile double target_temp;                                             // The target temperature set by the encoder's position.
+volatile bool isr_invalidate_next         = false;                       // Used to invalidate interrupt processing for the same pin to avoid bouncing.
+volatile bool backlight_on                = true;                        // Holds the value used to determine if we turn on or off the LCD backlight.
+heatsink_fan_mode_t hs_prev_mode          = heatsink_fan_mode_t::AUTO;   // The previous fan mode.
+volatile heatsink_fan_mode_t hs_fan_mode  = heatsink_fan_mode_t::AUTO;   // The heatsink fan mode to be set by the ISR.
+volatile unsigned long debounce_millis    = millis();                    // Stores the milliseconds since the controler was turned on so we can apply to the debouncer.
 
+// [10]
 // Creating devices.
 DeviceAddress tsens_addr;                               // Used by the heatsink temperature sensor.
 OneWire one_wire(PIN_TSENS);                            // Used by the heatsink temperature sensor.
@@ -133,6 +150,7 @@ LiquidCrystal_I2C lcd(0x27, 20, 4);                     // Used to control the I
 PID pid(&input, &output, &set_point, 2, 5, 1, DIRECT);  // The PID controller.
 KY040 encoder(PIN_ENC_CLK, PIN_ENC_DT);                 // The target temperature control encoder.
 
+// [11]
 // Custom char 'degrees' for celsius temperature.
 byte customChar[] = {
   0b00010,
@@ -145,6 +163,7 @@ byte customChar[] = {
   0b00000
 };
 
+// [12]
 /**
 * @brief Enables interrupts for the pin.
 *
@@ -162,6 +181,7 @@ void pci_setup(byte pin) {
   PCICR |= bit(digitalPinToPCICRbit(pin));
 }
 
+// [13]
 /**
 * @brief The Interrupt Service Routine to be called when the interrupt-enabled pins state changes (PCINT2_vect).
 * This rountine takes care of user input on the digital rotary encoder. The behavior is:
@@ -257,6 +277,7 @@ ISR(PCINT2_vect) {
   }
 }
 
+// [14]
 void setup() {
   // Initializing serial communication.
   Serial.begin(9600);
@@ -280,7 +301,7 @@ void setup() {
   // Turning OFF the heatsink fan.
   analogWrite(PIN_FAN, 0);
 
-  // Setting the setpoint to the minimum target temperature and configuring the PID.
+  // Setting the setpoint to the average temperature and configuring the PID.
   set_point = target_temp = ((MAX_TEMP - MIN_TEMP) / 2) + MIN_TEMP;
   pid.SetMode(AUTOMATIC);
 
@@ -294,6 +315,7 @@ void setup() {
   lcd.createChar(0, customChar);
 }
 
+// [15]
 void loop() {
   static bool our_backlight_on;
   static heatsink_fan_mode_t our_fan_mode;
@@ -364,13 +386,14 @@ void loop() {
     // We have temperature and rh. Let's get the absolute humidity and control the PID.
     absolute_humidity = get_abs_humidity();
     control_temperature();
-  } else {
+  }
+  else {
     temperature = 0.0;
     relative_humidity = 0.0;
   }
 
   // Algorithm to decide if we turn the heatsink fan on or off.
-  // This is used because once on the heating element cannot keep up with the cooling when the ambient
+  // This is used because the heating element cannot keep up with the cooling when the ambient
   // temperature is too low. So we turn the fan on and off to allow optimal temperature transfer and circulation.
   //
   // Workflow:
@@ -452,9 +475,10 @@ void loop() {
   delay(50);
 }
 
+// [16]
 /**
 * @brief Prints the status to the LCD display. The status includes ambient, target, and heatsink temperatures, relative and absolute humidity,
-*        heatsink fan status, and the PWM value being applied to the heating element.
+*        heatsink fan status, and the percentage of PWM being applied to the heating element.
 *
 * @returns Nothing.
 */
@@ -502,10 +526,11 @@ void print_status(void) {
 
   prev_power = current_power;
 
-  // Homing the LCD and delaying.
+  // Homing the LCD.
   lcd.home();
 }
 
+// [17]
 /**
 * @brief Controls the heating element temperature with the PID controller.
 *
@@ -537,6 +562,7 @@ void control_temperature(void) {
   }
 }
 
+// [18]
 /**
 * @brief Gets the heatsink temperature in celsius by reading the DS18B20 sensor.
 *
@@ -552,6 +578,7 @@ float get_heatsink_temperature(void) {
   return tsens.getTempC(tsens_addr, 1);
 }
 
+// [19]
 /**
 * @brief Converts relative humidity to absolute humidity.
 *
@@ -562,6 +589,7 @@ float get_abs_humidity(void) {
   return ((6.112 * (pow(EULER, ((17.67 * temperature) / (temperature + 243.5)))) * relative_humidity * 2.1674) / (273.15 + temperature));
 }
 
+// [20]
 /**
 * @brief Returns the digit count for a given unsigned char (byte).
 *
