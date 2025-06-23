@@ -107,7 +107,7 @@ Criando dispositivos.
 - DallasTemperature tsens(&one_wire): Utilizado pelo sensor de temperatura do dissipador
 - DHT_Unified dht(DHTPIN, DHTTYPE): Utilizado pelo sensor DHT22
 - LiquidCrystal_I2C lcd(0x27, 20, 4): Utilizado para controlar a interface *I2C* da tela LCD
-- PID pid(&input, &output, &set_point, 2, 5, 1, DIRECT): O controlador PID
+- PID pid(&input, &output, &set_point, 2, 5, 1, DIRECT): O controlador PID. 'P_ON_M' para medida proporcional, isso ajuda evitar altas oscilações quando a temperatura está chegando ou passando do alvo.
 - KY040 encoder(PIN_ENC_CLK, PIN_ENC_DT): O encoder usado para controlar a temperatura alvo
 
 ### \[11\]

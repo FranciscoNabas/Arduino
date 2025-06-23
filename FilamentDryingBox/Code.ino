@@ -142,13 +142,13 @@ volatile unsigned long debounce_millis    = millis();                    // Stor
 
 // [10]
 // Creating devices.
-DeviceAddress tsens_addr;                               // Used by the heatsink temperature sensor.
-OneWire one_wire(PIN_TSENS);                            // Used by the heatsink temperature sensor.
-DallasTemperature tsens(&one_wire);                     // Used by the heatsink temperature sensor.
-DHT_Unified dht(DHTPIN, DHTTYPE);                       // Used by the DHT22 sensor.
-LiquidCrystal_I2C lcd(0x27, 20, 4);                     // Used to control the I2C LCD display interface.
-PID pid(&input, &output, &set_point, 2, 5, 1, DIRECT);  // The PID controller.
-KY040 encoder(PIN_ENC_CLK, PIN_ENC_DT);                 // The target temperature control encoder.
+DeviceAddress tsens_addr;                                        // Used by the heatsink temperature sensor.
+OneWire one_wire(PIN_TSENS);                                     // Used by the heatsink temperature sensor.
+DallasTemperature tsens(&one_wire);                              // Used by the heatsink temperature sensor.
+DHT_Unified dht(DHTPIN, DHTTYPE);                                // Used by the DHT22 sensor.
+LiquidCrystal_I2C lcd(0x27, 20, 4);                              // Used to control the I2C LCD display interface.
+PID pid(&input, &output, &set_point, 2, 5, 1, P_ON_M,  DIRECT);  // The PID controller. 'P_ON_M' for proportional on measurement, this helps to avoid overshoots and keeps the temperature more stable.
+KY040 encoder(PIN_ENC_CLK, PIN_ENC_DT);                          // The target temperature control encoder.
 
 // [11]
 // Custom char 'degrees' for celsius temperature.
@@ -555,8 +555,9 @@ void control_temperature(void) {
   // set_point = (double)((int)(MIN_TEMP + ((MIN_TEMP - MAX_TEMP) * percent)));
 
   if (!isnan(temperature)) {
-    // Computing the output PWM and applying to the heating element pin.
     input = temperature;
+    
+    // Computing the output PWM and applying to the heating element pin.
     pid.Compute();
     analogWrite(PIN_H_ELEMENT, output);
   }
