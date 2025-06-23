@@ -97,6 +97,9 @@
 // before the debounce timeout.
 #define DEBOUNCE_MS      250
 
+// Defines how long should we hold the button down to change the LCD backlight state.
+#define BACKLIGHT_OFF_TRIGGER_MS 1000
+
 // An enum representing the heatsing fan mode.
 enum class heatsink_fan_mode_t {
   ON,       // The fan is always on.
@@ -114,10 +117,12 @@ float heatsink_temp      = 0.0;                       // The heatsink temperatur
 int enc_pina_prev        = 0;                         // Variable to store the previous state of the encoder 'A' (CLK) pin.
 double input, set_point, output;                      // Variables used by the PID controller. input == temperature, set_point == target, output == PID output.
 
-volatile double target_temp;                          // The raw target temperature set by the encoder's position.
-heatsink_fan_mode_t hs_prev_mode;                     // The previous fan mode.
-volatile heatsink_fan_mode_t hs_fan_mode;             // The heatsink fan mode to be set by the ISR.
-volatile unsigned long debounce_millis = millis();    // Stores the milliseconds since the controler was turned on so we can apply to the debouncer.
+volatile double target_temp;                                            // The raw target temperature set by the encoder's position.
+volatile bool isr_invalidate_next = false;                              // Used to invalidate interrupt processing for the same pin to avoid bouncing.
+volatile bool backlight_on = true;                                      // Holds the value used to determine if we turn on or off the LCD backlight.
+heatsink_fan_mode_t hs_prev_mode = heatsink_fan_mode_t::AUTO;           // The previous fan mode.
+volatile heatsink_fan_mode_t hs_fan_mode = heatsink_fan_mode_t::AUTO;   // The heatsink fan mode to be set by the ISR.
+volatile unsigned long debounce_millis = millis();                      // Stores the milliseconds since the controler was turned on so we can apply to the debouncer.
 
 // Creating devices.
 DeviceAddress tsens_addr;                               // Used by the heatsink temperature sensor.
@@ -158,9 +163,15 @@ void pci_setup(byte pin) {
 }
 
 /**
-* @brief The ISR (Interrupt Service Routine) to be called when the interrupt-enabled pins state changes (PCINT2_vect).
+* @brief The Interrupt Service Routine to be called when the interrupt-enabled pins state changes (PCINT2_vect).
+* This rountine takes care of user input on the digital rotary encoder. The behavior is:
+*     - If rotated clockwise: Increases the target temperature.
+*     - If rotated counter-clockwise: Decreases the target temperature.
+*     - If the button was pressed (under one second): Changes the heatsink fan mode.
+*     - If the button was pressed (over one second): Turns the LCD backlight on or off.
 */
 ISR(PCINT2_vect) {
+  // Variable indicating it's the first time the ISR is triggered.
   static bool first = true;
 
   // Getting the encoder state to check if it was rotated and making sure our target temperature is within our limits.
@@ -176,10 +187,52 @@ ISR(PCINT2_vect) {
 
   // Checking if the encoder switch was pressed.
   if (digitalRead(PIN_ENC_SW) == LOW) {
-    unsigned long current_millis = millis();
+    // The current milliseconds since the controler was turned on. We use this
+    // to compare with the previous state for debouncing.
+    unsigned long current_millis = micros() / 1000;
+    
+    // The timeout in microseconds since we got in this control block.
+    unsigned long bl_timeout = 0;
 
-    // If the debouncing period elapsed or this is the first time we press the button we change the fan mode.
-    if (current_millis - debounce_millis >= DEBOUNCE_MS || first) {
+    // This loop waits until the user releases the button or the timeout expired, determining
+    // what operation we will perform next.
+    do {
+      // "Heeeeeey you shouldn't wait in an ISR maaaaaaaaaaan..." Yeah yeah master of all that is technological, don't tell me what to do.
+      delayMicroseconds(100);
+      bl_timeout += 100;
+    } while (digitalRead(PIN_ENC_SW) == LOW && bl_timeout / 1000 < BACKLIGHT_OFF_TRIGGER_MS);
+
+    if (bl_timeout / 1000 >= BACKLIGHT_OFF_TRIGGER_MS) {
+      // The user held the button for more than 'BACKLIGHT_OFF_TRIGGER_MS', so we change the LCD backlight state.
+      backlight_on = !backlight_on;
+
+      // Since we waited for 'BACKLIGHT_OFF_TRIGGER_MS' our debouncer timer already passed the 'DEBOUNCE_MS', so if we
+      // have a bounce we'll change the fan state. We use this variable to invalidate the next pin change if it happens
+      // before we passed the 'DEBOUNCE_MS'. We don't invalidate it after that because that will be a legitimate user input.
+      isr_invalidate_next = true;
+    }
+    else {
+      // If the debouncing period elapsed or this is the first time we press the button we change the fan mode.
+      if (isr_invalidate_next) {
+        isr_invalidate_next = false;
+
+        // The invalidate flag is set, are we within the debouncing period?
+        if (current_millis - debounce_millis < DEBOUNCE_MS)
+          // Yes. Ball.
+          goto BTN_END;
+        else
+          // No. Change fan mode.
+          goto CHANGE_FAN_MODE;
+      }
+      else {
+        // The invalidate flag is not set, so we check the debouncing period and change the fan mode if applicable.
+        if ((current_millis - debounce_millis >= DEBOUNCE_MS || first))
+          goto CHANGE_FAN_MODE;
+        else
+          goto BTN_END;
+      }
+
+      CHANGE_FAN_MODE:
       switch (hs_fan_mode) {
         case heatsink_fan_mode_t::AUTO:
           hs_fan_mode = heatsink_fan_mode_t::ON;
@@ -196,6 +249,8 @@ ISR(PCINT2_vect) {
 
       // Saving the millis since we changed the mode.
       debounce_millis = current_millis;
+
+      BTN_END:
       if (first)
         first = false;
     }
@@ -222,9 +277,6 @@ void setup() {
   pci_setup(PIN_ENC_DT);
   pci_setup(PIN_ENC_SW);
 
-  // Setting the heatsink fan mode to automatic.
-  hs_fan_mode = hs_prev_mode = heatsink_fan_mode_t::AUTO;
-
   // Turning OFF the heatsink fan.
   analogWrite(PIN_FAN, 0);
 
@@ -243,20 +295,28 @@ void setup() {
 }
 
 void loop() {
+  static bool our_backlight_on;
   static heatsink_fan_mode_t our_fan_mode;
 
   // Reading the volatile variables set by the interrupt.
   // During the reading we disable interrupts (cli()) to avoid race conditions.
   cli();
-  set_point = target_temp;      // Setting the PID set point based on the target temperature.
-  our_fan_mode = hs_fan_mode;   // Saving the fan mode so we can analyze it.
-  sei();                        // Re-enabling interrupts.
+  set_point = target_temp;          // Setting the PID set point based on the target temperature.
+  our_fan_mode = hs_fan_mode;       // Saving the fan mode so we can analyze it.
+  our_backlight_on = backlight_on;  // Saving the LCD backlight state.
+  sei();                            // Re-enabling interrupts.
 
   // We print all the status twice in the loop. We do that because when all the sensors are functioning it takes
   // some time to perform all the readings, calculations, and controlling the temperature.
   // If the user rotates the encoder it takes some time for the value to reflect in the LCD display.
   // Printing the status here makes it more responsive, but it prints the old values. That's why we print a second time later.
   print_status();
+
+  // Managing the LCD backlight according to our state.
+  if (our_backlight_on)
+    lcd.backlight();
+  else
+    lcd.noBacklight();
 
   if (our_fan_mode != hs_prev_mode) {
     // Fan mode changed, so we print the status on the display.
