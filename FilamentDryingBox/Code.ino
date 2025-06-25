@@ -75,8 +75,9 @@
 
 // [2]
 // Defining temperature thresholds.
-#define MIN_TEMP         ((double)30.00)  // Minimum target temperature.
-#define MAX_TEMP         ((double)70.00)  // Maximum target temperature.
+#define MIN_TEMP         30.00            // Minimum target temperature.
+// #define MAX_TEMP      70.00            // Maximum target temperature.
+#define MAX_TEMP         100.00           // Let's see what this puppy can do.
 #define TEMP_TGT_DIFF    05.00            // Temperature differential between the heatsink and ambient temperature. Used to decide if we shut off the fan.
 #define HS_MAX_TEMP      80.00            // Heatsink maximum temperature.
 #define HS_TEM_DIFF_CUT  20.00            // Heatsink temperature cutoff. Used to decide if we shut off the fan.
@@ -108,7 +109,7 @@
 // The 'KY040.h' library does a terrific job avoiding bounces when turning the pot, but it doesn't support
 // the switch. So we implement a very rudimentary debouncing algorithm rejecting any extra signal that comes
 // before the debounce timeout.
-#define DEBOUNCE_MS      250
+#define DEBOUNCE_MS      350
 
 // [7]
 // Defines how long should we hold the button down to change the LCD backlight state.
@@ -132,6 +133,7 @@ float absolute_humidity  = 0.0;                       // The ambient absolute hu
 float heatsink_temp      = 0.0;                       // The heatsink temperature.
 int enc_pina_prev        = 0;                         // Variable to store the previous state of the encoder 'A' (CLK) pin.
 double input, set_point, output;                      // Variables used by the PID controller. input == temperature, set_point == target, output == PID output.
+double previous_temperature;                          // Stores the previous setpoint temperature before we read the encoder.
 
 volatile double target_temp;                                             // The target temperature set by the encoder's position.
 volatile bool isr_invalidate_next         = false;                       // Used to invalidate interrupt processing for the same pin to avoid bouncing.
@@ -152,7 +154,7 @@ KY040 encoder(PIN_ENC_CLK, PIN_ENC_DT);                          // The target t
 
 // [11]
 // Custom char 'degrees' for celsius temperature.
-byte customChar[] = {
+byte degrees_char[] = {
   0b00010,
   0b00101,
   0b00101,
@@ -160,7 +162,7 @@ byte customChar[] = {
   0b00000,
   0b00000,
   0b00000,
-  0b00000
+  0b00000,
 };
 
 // [12]
@@ -223,7 +225,7 @@ ISR(PCINT2_vect) {
     } while (digitalRead(PIN_ENC_SW) == LOW && bl_timeout / 1000 < BACKLIGHT_OFF_TRIGGER_MS);
 
     if (bl_timeout / 1000 >= BACKLIGHT_OFF_TRIGGER_MS) {
-      // The user held the button for more than 'BACKLIGHT_OFF_TRIGGER_MS', so we change the LCD backlight state.
+      // The user held the button for more than 'BACKLIGHT_OFF_TRIGGER_MS', so we toggle the LCD backlight state.
       backlight_on = !backlight_on;
 
       // Since we waited for 'BACKLIGHT_OFF_TRIGGER_MS' our debouncer timer already passed the 'DEBOUNCE_MS', so if we
@@ -302,7 +304,7 @@ void setup() {
   analogWrite(PIN_FAN, 0);
 
   // Setting the setpoint to the average temperature and configuring the PID.
-  set_point = target_temp = ((MAX_TEMP - MIN_TEMP) / 2) + MIN_TEMP;
+  set_point = target_temp = previous_temperature = ((MAX_TEMP - MIN_TEMP) / 2) + MIN_TEMP;
   pid.SetMode(AUTOMATIC);
 
   // Initializing sensors.
@@ -312,13 +314,15 @@ void setup() {
   // Initializing LCD display.
   lcd.init();
   lcd.backlight();
-  lcd.createChar(0, customChar);
+  lcd.createChar(0, degrees_char);
 }
 
 // [15]
 void loop() {
   static bool our_backlight_on;
   static heatsink_fan_mode_t our_fan_mode;
+
+  previous_temperature = set_point;
 
   // Reading the volatile variables set by the interrupt.
   // During the reading we disable interrupts (cli()) to avoid race conditions.
@@ -448,9 +452,9 @@ void loop() {
           }
         }
         else {
-          // We are not starting up, so if the fan is on we turn it off when the heatsink temperature is smaller than the ambient temperature plus the cuttoff
-          // and the ambient temperature is smaller than the target minus the differential.
-          if (fan_on && heatsink_temp <= temperature + HS_TEM_DIFF_CUT && temperature <= set_point - TEMP_TGT_DIFF) {
+          // We are not starting up, so if the fan is on we turn it off when the heatsink temperature is smaller than the ambient temperature plus the cuttoff,
+          // the ambient temperature is smaller than the target minus the differential, and the heatsink temperature is lower than the maximum heatsink temperature target.
+          if (fan_on && heatsink_temp < temperature + HS_TEM_DIFF_CUT && temperature < set_point - TEMP_TGT_DIFF && heatsink_temp < HS_MAX_TEMP) {
             analogWrite(PIN_FAN, 0);
             fan_on = false;
           }
@@ -469,10 +473,13 @@ void loop() {
   // Printing the status again.
   print_status();
 
-  // Delaying. This period is sometimes not enough for the heatsink sensor to update which causes
-  // us not being able to read the temperature. But it's only once in a while.
-  // To be honest there's no harm in increasing the delay here, other than the user's input responsiveness.
-  delay(50);
+  // Delaying.
+  // At this value sometimes the heatsink temperature sensor fails to return the temperature.
+  // The right thing to do here is to get the datasheet for these sensors, find the minimum refresh time, and apply the biggest value here.
+  // Problem is, for the DHT22, on 'DHT_Unified::setMinDelay(sensor_t *sensor)', on DHT_U.cpp the minimum refresh time is 2 secods.
+  // This is too much to have a decent responsiveness for user input.
+  // At 100ms the DHT22 doesn't fail (at least I didn't see it), but the DS18B20 does from time to time.
+  delay(100);
 }
 
 // [16]
@@ -485,6 +492,15 @@ void loop() {
 void print_status(void) {
   static uint8_t prev_power = 0;
 
+  char* last_temp_text;
+
+  // If the previous temperature have more digits than the new setpoint erase the last digit to avoid ghost characters.
+  // lcd.clear() also works, but the display flashes briefly, which pisses me off.
+  if (get_digit_count(previous_temperature) > get_digit_count(set_point))
+    last_temp_text = "C ";
+  else
+    last_temp_text = "C";
+
   // Printing ambient temperature.
   lcd.print("Tmp:");
   lcd.print(temperature);
@@ -492,7 +508,7 @@ void print_status(void) {
   lcd.print("C/");
   lcd.print(set_point);
   lcd.write(0);
-  lcd.print("C");
+  lcd.print(last_temp_text);
 
   // Printint relative and absolute humidity.
   lcd.setCursor(0, 1);
@@ -517,14 +533,20 @@ void print_status(void) {
 
   uint8_t current_power = (uint8_t)((output / 255) * 100);
 
-  // If we have less digits we clear the LCD to avoid ghost cells.
+  char* last_pwr_text;
+
+  // If we have less digits we clear the last digit to avoid ghost cells.
+  // lcd.clear() also works, but the display flashes briefly, which pisses me off.
   if (get_digit_count(current_power) < get_digit_count(prev_power))
-    lcd.clear();
+    last_pwr_text = "% ";
+  else
+    last_pwr_text = "%";
 
   lcd.print(current_power < 100 ? current_power : 100);
-  lcd.print("%");
+  lcd.print(last_pwr_text);
 
   prev_power = current_power;
+  previous_temperature = set_point;
 
   // Homing the LCD.
   lcd.home();
