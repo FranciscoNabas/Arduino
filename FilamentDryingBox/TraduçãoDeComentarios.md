@@ -73,11 +73,15 @@ Define por quanto tempo devemos segurar o botão do encoder apertado para mudar 
 
 ### \[8\]
 
+Tipos.
 Uma enumeração representando os modos do ventilador do dissipador.
 
 - ON    : O ventilador está sempre ligado
 - OFF   : O ventilador está sempre desligado
 - AUTO  : O ventilador está ligado ou desligado de acordo com nosso algorítmo
+
+Estrutura representando a temperatura alvo salva na memoria EEPROM.
+Desta maneira quando o usuário desligar e ligar o controlador vai carregar a temperatura alvo anterior.
 
 ### \[9\]
 
@@ -91,6 +95,8 @@ Variáveis globais.
 - float heatsink_temp: A temperatura do dissipador
 - int enc_pina_prev: Variável para armazenar o estado anterior do pino *A* (CLK) do encoder
 - double input, set_point, output: Variáveis usadas pelo controlador PID. input == temperatura, set_point == alvo, output == saída do PID
+- double previous_temperature: Salva o valor anterior do setpoint antes de lermos o encoder.
+- eeprom_target_temp_data_t target_temp_data: Temperatura alvo salva na EEPROM.
 - volatile double target_temp: A temperatura alvo definida pela posição do encoder
 - volatile bool isr_invalidate_next: Usada para invalidar o processamento de *interrupts* para o mesmo pino para evitar *bouncing*
 - volatile bool backlight_on: Possui o valor usado para determinar se ligamos ou desligamos a luz de fundo da tela LCD
@@ -116,7 +122,7 @@ Caractere especial para o display que representa o símbolo '°'.
 
 ### \[12\]
 
-```c
+```cpp
 /**
 * @brief Habilita interrupts para o pino.
 *
@@ -137,7 +143,7 @@ void pci_setup(byte pin) {
 
 ### \[13\]
 
-```c
+```cpp
 /**
 * @brief A rotina de serviço de *interrupt* (Interrupt service routine - ISR) para ser chamada quando o estado dos pinos habilitados para *interrupt* mudar.
 * Essa rotina cuida do input do usuário no encoder digital rotativo. O comportamento é:
@@ -151,14 +157,19 @@ ISR(PCINT2_vect) {
   static bool first = true;
 
   // Pegando o estado do encoder para checar se ele foi rotacionado e garantindo que nossa temperatura alvo está dentro dos nossos limites.
+  // Se a temperatura mudou nós também salvamos o novo valor na memoria EEPROM para ser carregado quando o usuário reiniciar o MCU.
   switch (encoder.getRotation()) {
-    case KY040::CLOCKWISE:
+    case KY040::CLOCKWISE: {
       target_temp = target_temp < MAX_TEMP ? target_temp + 1 : MAX_TEMP;
-      break;
+      target_temp_data.value = target_temp;
+      EEPROM.put(0, target_temp_data);
+    } break;
 
-    case KY040::COUNTERCLOCKWISE:
+    case KY040::COUNTERCLOCKWISE: {
       target_temp = target_temp > MIN_TEMP ? target_temp - 1 : MIN_TEMP;
-      break;
+      target_temp_data.value = target_temp;
+      EEPROM.put(0, target_temp_data);
+    } break;
   }
 
   // Checando se o botão do encoder foi pressionado.
@@ -234,7 +245,7 @@ ISR(PCINT2_vect) {
 
 ### \[14\]
 
-```c
+```cpp
 void setup() {
   // Inicializando a comunicação serial.
   Serial.begin(9600);
@@ -258,8 +269,19 @@ void setup() {
   // Desligando o ventilador do dissipador.
   analogWrite(PIN_FAN, 0);
 
-  // Setando o 'setpoint' para a temperatura média entre o mínimo e maximo e configurando o PID.
-  set_point = target_temp = ((MAX_TEMP - MIN_TEMP) / 2) + MIN_TEMP;
+  // Lendo a EEPROM para checar se temos um valor de temperatura alvo salvo.
+  EEPROM.get<eeprom_target_temp_data_t>(0, target_temp_data);
+  if (target_temp_data.magic_number != EEPROM_MAGIC_NUMBER) {
+    // EEPROM não contém nossos dados, então nós zeramos ela e salvamos o valor padrão de temperatura alvo.
+    erase_eeprom();
+    target_temp_data.magic_number = EEPROM_MAGIC_NUMBER;
+    target_temp_data.value = ((MAX_TEMP - MIN_TEMP) / 2) + MIN_TEMP;
+    EEPROM.put<eeprom_target_temp_data_t>(0, target_temp_data);
+  }
+
+  // Setando o setpoint para o valor armazenado na EEPROM, ou o default.
+  set_point = target_temp = previous_temperature = static_cast<double>(target_temp_data.value);
+
   pid.SetMode(AUTOMATIC);
 
   // Inicializando os sensores.
@@ -275,10 +297,14 @@ void setup() {
 
 ### \[15\]
 
-```c
+```cpp
 void loop() {
   static bool our_backlight_on;
   static heatsink_fan_mode_t our_fan_mode;
+
+  // Salvando o setpoint atual antes de mudarmos para o valor da ISR para que podemos determinar
+  // se o número de caracteres no texto mudou.
+  previous_temperature = set_point;
 
   // Lendo as variáveis voláteis setadas pela ISR.
   // Durante a leitura nós desabilitamos 'interrupts' (cli()) para evitar 'race conditions'.
@@ -429,7 +455,7 @@ void loop() {
 
 ### \[16\]
 
-```c
+```cpp
 /**
 * @brief Imprime o status para a tela LCD. O status inclui as temperaturas ambiente, alvo e do dissipador, umidade relativa e absoluta, status do ventilador do dissipador, e a porcentagem do PWM sendo aplicado no elemento aquecedor.
 *
@@ -438,6 +464,15 @@ void loop() {
 void print_status(void) {
   static uint8_t prev_power = 0;
 
+  char* last_temp_text;
+
+  // Se a temperatura anterior tem mais dígitos do que o novo setpoint nós apagamos o ultimo dígito pra evitar caracteres fantasma.
+  // lcd.clear() também funciona, mas a tela pisca momentaneamente, o que me enche o saco.
+  if (get_digit_count(previous_temperature) > get_digit_count(set_point))
+    last_temp_text = "C ";
+  else
+    last_temp_text = "C";
+
   // Imprimindo a temperatura ambiente.
   lcd.print("Tmp:");
   lcd.print(temperature);
@@ -445,7 +480,7 @@ void print_status(void) {
   lcd.print("C/");
   lcd.print(set_point);
   lcd.write(0);
-  lcd.print("C");
+  lcd.print(last_temp_text);
 
   // Imprimindo a umidade relativa e absoluta.
   lcd.setCursor(0, 1);
@@ -462,7 +497,7 @@ void print_status(void) {
   lcd.write(0);
   lcd.print("C");
 
-  // Imprimindo se o ventilador está ligado e a potencia equivalente do valor do PWM no elemento aquecedor.
+  // Imprimindo se o ventilador está ligado e a potência equivalente ao PWM aplicado no pino do elemento aquecedor.
   lcd.setCursor(0, 3);
   lcd.print("Fan on:");
   lcd.print(fan_on ? "Yes" : "No ");
@@ -470,23 +505,29 @@ void print_status(void) {
 
   uint8_t current_power = (uint8_t)((output / 255) * 100);
 
-  // Se temos menos dígitos nós limpamos a tela LCD para evitar células fantasma.
+  char* last_pwr_text;
+
+  // Se a gente tem menos dígitos do que anteriormente nós apagamos o último dígito para evitar células fantasma.
   if (get_digit_count(current_power) < get_digit_count(prev_power))
-    lcd.clear();
+    last_pwr_text = "% ";
+  else
+    last_pwr_text = "%";
 
   lcd.print(current_power < 100 ? current_power : 100);
-  lcd.print("%");
+  lcd.print(last_pwr_text);
 
+  // Salvando a potência e temperatura atuais.
   prev_power = current_power;
+  previous_temperature = set_point;
 
-  // Setando o cursor para o início do display.
+  // Homing the LCD.
   lcd.home();
 }
 ```
 
 ### \[17\]
 
-```c
+```cpp
 /**
 * @brief Controla o elemento aquecedor com o controlador PID.
 *
@@ -517,7 +558,7 @@ void control_temperature(void) {
 
 ### \[18\]
 
-```c
+```cpp
 /**
 * @brief Retorna a temperatura do dissipador em graus célsius lendo o sensor DS18B20.
 *
@@ -536,7 +577,7 @@ float get_heatsink_temperature(void) {
 
 ### \[19\]
 
-```c
+```cpp
 /**
 * @brief Converte a umidade relativa para umidade absoluta.
 *
@@ -549,7 +590,7 @@ float get_abs_humidity(void) {
 
 ### \[20\]
 
-```c
+```cpp
 /**
 * @brief Retorna o número de digitos para um certo 'unsigned byte' (número positivo de 8 bits).
 *
@@ -563,5 +604,19 @@ uint8_t get_digit_count(uint8_t number) {
   if (number < 100) return 2;
 
   return 3;
+}
+```
+
+### \[21\]
+
+```cpppp
+/**
+* @brief Apaga a EEPROM inteira enchendo ela de zeros.
+*
+* @returns Nada.
+*/
+void erase_eeprom() {
+  for (uint16_t i = 0; i < EEPROM.length(); i++)
+    EEPROM.write(i, 0);
 }
 ```

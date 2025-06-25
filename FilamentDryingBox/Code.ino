@@ -68,6 +68,7 @@
 #include <Wire.h>
 #include <DHT_U.h>
 #include <KY040.h>
+#include <EEPROM.h>
 #include <PID_v1.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -115,12 +116,22 @@
 // Defines how long should we hold the button down to change the LCD backlight state.
 #define BACKLIGHT_OFF_TRIGGER_MS 1000
 
+#define EEPROM_MAGIC_NUMBER 0x54697473
+
 // [8]
+// Types.
 // An enum representing the heatsing fan mode.
 enum class heatsink_fan_mode_t {
   ON,       // The fan is always on.
   OFF,      // The fan is always off.
   AUTO,     // The fan is on or off according to our algorithm.
+};
+
+// A structure representing the target temperature stored in the EEPROM.
+// This way when te user turns off the MCU and turns it on again it will load the previous target temperature.
+struct __attribute__((packed)) eeprom_target_temp_data_t {
+  uint32_t magic_number;
+  uint8_t value;
 };
 
 // [9]
@@ -134,6 +145,7 @@ float heatsink_temp      = 0.0;                       // The heatsink temperatur
 int enc_pina_prev        = 0;                         // Variable to store the previous state of the encoder 'A' (CLK) pin.
 double input, set_point, output;                      // Variables used by the PID controller. input == temperature, set_point == target, output == PID output.
 double previous_temperature;                          // Stores the previous setpoint temperature before we read the encoder.
+eeprom_target_temp_data_t target_temp_data{ };        // Target temperature stored in the EEPROM.
 
 volatile double target_temp;                                             // The target temperature set by the encoder's position.
 volatile bool isr_invalidate_next         = false;                       // Used to invalidate interrupt processing for the same pin to avoid bouncing.
@@ -197,14 +209,19 @@ ISR(PCINT2_vect) {
   static bool first = true;
 
   // Getting the encoder state to check if it was rotated and making sure our target temperature is within our limits.
+  // If we have a change we also save the value in the EEPROM to be loaded when the user restarts the MCU.
   switch (encoder.getRotation()) {
-    case KY040::CLOCKWISE:
+    case KY040::CLOCKWISE: {
       target_temp = target_temp < MAX_TEMP ? target_temp + 1 : MAX_TEMP;
-      break;
+      target_temp_data.value = target_temp;
+      EEPROM.put(0, target_temp_data);
+    } break;
 
-    case KY040::COUNTERCLOCKWISE:
+    case KY040::COUNTERCLOCKWISE: {
       target_temp = target_temp > MIN_TEMP ? target_temp - 1 : MIN_TEMP;
-      break;
+      target_temp_data.value = target_temp;
+      EEPROM.put(0, target_temp_data);
+    } break;
   }
 
   // Checking if the encoder switch was pressed.
@@ -303,8 +320,18 @@ void setup() {
   // Turning OFF the heatsink fan.
   analogWrite(PIN_FAN, 0);
 
-  // Setting the setpoint to the average temperature and configuring the PID.
-  set_point = target_temp = previous_temperature = ((MAX_TEMP - MIN_TEMP) / 2) + MIN_TEMP;
+  // Reading from the EEPROM to see if we have a previous target temperature value set.
+  EEPROM.get<eeprom_target_temp_data_t>(0, target_temp_data);
+  if (target_temp_data.magic_number != EEPROM_MAGIC_NUMBER) {
+    // EEPROM doesn't contain our data, so we zero it and store the default target temperature value there.
+    erase_eeprom();
+    target_temp_data.magic_number = EEPROM_MAGIC_NUMBER;
+    target_temp_data.value = ((MAX_TEMP - MIN_TEMP) / 2) + MIN_TEMP;
+    EEPROM.put<eeprom_target_temp_data_t>(0, target_temp_data);
+  }
+
+  // Setting the setpoint to the value stored in the EEPROM or the default value.
+  set_point = target_temp = previous_temperature = static_cast<double>(target_temp_data.value);
   pid.SetMode(AUTOMATIC);
 
   // Initializing sensors.
@@ -629,4 +656,15 @@ uint8_t get_digit_count(uint8_t number) {
   if (number < 100) return 2;
 
   return 3;
+}
+
+// [21]
+/**
+* @brief Erases the entire EEPROM by filling it with zeroes.
+*
+* @returns Nothing.
+*/
+void erase_eeprom() {
+  for (uint16_t i = 0; i < EEPROM.length(); i++)
+    EEPROM.write(i, 0);
 }
