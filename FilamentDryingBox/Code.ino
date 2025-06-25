@@ -322,6 +322,8 @@ void loop() {
   static bool our_backlight_on;
   static heatsink_fan_mode_t our_fan_mode;
 
+  // Saving the current setpoint before we change it to the ISR's so we can determine if
+  // The number of characters in the text will change.
   previous_temperature = set_point;
 
   // Reading the volatile variables set by the interrupt.
@@ -545,6 +547,7 @@ void print_status(void) {
   lcd.print(current_power < 100 ? current_power : 100);
   lcd.print(last_pwr_text);
 
+  // Saving the current power and temperature values.
   prev_power = current_power;
   previous_temperature = set_point;
 
