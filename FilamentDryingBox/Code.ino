@@ -323,7 +323,7 @@ void loop() {
   static heatsink_fan_mode_t our_fan_mode;
 
   // Saving the current setpoint before we change it to the ISR's so we can determine if
-  // The number of characters in the text will change.
+  // the number of characters in the text will change.
   previous_temperature = set_point;
 
   // Reading the volatile variables set by the interrupt.
